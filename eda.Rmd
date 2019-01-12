@@ -1,0 +1,153 @@
+---
+title: "test"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+###Libraries
+```{r}
+library(tidyverse)
+library(FactoMineR)
+library(knitr)
+```
+
+```{r}
+df <- read_csv("data/data.csv")
+```
+
+```{r}
+dim(df)
+names(df)
+glimpse(df)
+```
+
+###change variables
+```{r}
+df <- df %>% rename('stream_id' = '#stream') # '#' symbol reserved for comments
+df <- df %>% mutate(stream_id= factor(stream_id), isp= factor(isp), browser= factor(browser), connected= factor(connected)) #2 vars categorized
+```
+
+###Dealing with NAs
+```{r}
+dim(df)[1] - dim(na.omit(df))[1]
+
+#only one NA, can be overlooked
+df <- na.omit(df)
+```
+
+###EDA
+```{r}
+colSums(df %>% select(p2p, cdn) %>% filter(!is.na(cdn))) # total data transmitted
+
+df %>% filter(connected==F) %>% distinct(p2p) # Observe: no backend connection <=> no p2p
+```
+
+###Visualisation of the distribution between p2p and cdn
+```{r}
+factors <- c(quo(stream_id), quo(isp), quo(browser), quo(connected))
+
+for (i in seq_along(factors)) {
+  temp <- df %>% group_by(!!factors[[i]]) %>% summarize(p2p= sum(p2p), cdn= sum(cdn))
+  temp <- reshape2::melt(temp, id.vars= names(df)[i])
+  print( ggplot(temp, aes(!!factors[[i]], value, fill = variable)) +
+    geom_bar(position = "fill", stat = "identity") )
+}
+
+```
+
+
+
+```{r}
+cor.test(df$p2p, df$cdn)
+```
+
+    Statistically significant correlation between the two types of downloaded data.
+
+###Potential Outliers    
+```{r}
+is_outlier <- function(x) {
+  return(x < quantile(x, 0.25) - 2 * IQR(x) | x > quantile(x, 0.75) + 2 * IQR(x))
+}
+
+out_p2p <- which(is_outlier(df$p2p))
+out_cdn <- which(is_outlier(df$cdn))
+```
+
+###Clustering
+    
+    Use k-means clustering to get fewer clusters and hierarchical clustering on top of that and decide clusters based on inertia.
+    Initially, use factor analysis of mixed data to reduce noise.
+    
+```{r}
+
+res.famd <- FAMD(df, ncp= Inf, graph = F)
+res.famd$eig #keep 14 comp ~ 95% variance
+res.famd <- FAMD(df, ncp= 14)
+
+in_ratio <- c()
+for (k in 1:30) {
+  cl <- kmeans(res.famd$ind$coord, centers = k, nstart = 3)
+  in_ratio <- c(in_ratio, cl$betweens/cl$totss)
+}
+in_ratio <- as.data.frame(in_ratio)
+
+ggplot(in_ratio, aes(x=1:30, y=in_ratio)) + 
+  geom_point(shape=1) +
+  labs(title= "inertia ratio per clustering")
+```
+
+
+    Based on the ratio of between inertia to total inertia 9 clusters are chosen. Through catdes the clusters are described.
+    
+```{r}
+res.kmeans <- kmeans(res.famd$ind$coord, centers = 9, nstart = 3)
+
+cluster <- factor(res.kmeans$cluster)
+df <- cbind(cluster, df)
+
+rescatdes <- catdes(df, 1)
+
+kable(rescatdes$category)
+```
+
+
+```{r}
+#assign labels to clusters
+lbs = c("stream_id=4", 
+        "stream_id=2",
+        "connected=FALSE",
+        "stream_id=5",
+        "stream_id=7",
+        "isp=BTP",
+        "stream_id=1 & stream_id=3",
+        "stream_id=6",
+        "browser=Vectrice")
+
+cluster <- factor(res.kmeans$cluster, labels = lbs)
+
+kable(cbind(levels(cluster), res.kmeans$size), col.names = c('Cluster', 'Size'))
+```
+
+
+###Projection of the clusters on principal components
+```{r}
+df_plot <- tibble(cluster, Dim_1= res.famd$ind$coord[,1], Dim_2= res.famd$ind$coord[,2])
+
+ggplot(df_plot, aes(x= Dim_1, y= Dim_2, colour= cluster)) +
+  geom_point() +
+  theme_dark()
+```
+
+###data usage type per cluster
+```{r}
+temp <- df %>% select(cluster, p2p, cdn) %>% group_by(cluster) %>% summarize(p2p= mean(p2p), cdn= mean(cdn))
+
+temp <- reshape2::melt(temp, id.vars= names(temp)[1])
+
+ggplot(temp, aes(cluster, value, fill = variable)) +
+    geom_bar(position = "fill", stat = "identity") 
+```
+
